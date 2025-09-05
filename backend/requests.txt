@@ -119,3 +119,28 @@ Response:
     ]
 }
 --------------------------------------------------------------
+File 4 : 
+
+API : /backend/select-language 
+
+Request : 
+    {
+    "language" : "python"
+}
+
+
+API : GET /backend/get-lesson/<lesson_number>?session_id=<session_id>
+
+http://127.0.0.1:5000/backend/get-lesson/1?session_id=session_1757075073.464431
+
+--------------------------------------------------------------
+ API : /backend/ask-tutor
+
+ Request : {
+"session_id": "session_1757075073.464431",
+"question": "What is a Python variable?"
+
+}
+
+----------------------------------------
+API : 

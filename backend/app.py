@@ -481,6 +481,236 @@ def healthcheck():
         "ai_base_url": AI_BASE_URL
     })
 
+
+#-----------------------------------------------------------------------
+# File 4 : 
+#-----------------------------------------------------------------------
+
+# Base URL of your FastAPI AI service
+AI_API_BASE = AI_BASE_URL   # change to your FastAPI service URL
+
+# ---------------------------
+# Helper Functions
+# ---------------------------
+
+from flask import Flask, request, jsonify
+import requests
+import json
+import os
+from datetime import datetime
+
+
+SESSIONS_FILE = "sessions.json"
+
+# -----------------------------
+# JSON Storage Helpers
+# -----------------------------
+def load_sessions():
+    if os.path.exists(SESSIONS_FILE):
+        with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
+
+def save_sessions(data):
+    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_session(session_id):
+    sessions = load_sessions()
+    return sessions.get(session_id)
+
+
+def save_session(session_data):
+    sessions = load_sessions()
+    sessions[session_data["session_id"]] = session_data
+    save_sessions(sessions)
+
+
+# -----------------------------
+# API Helpers
+# -----------------------------
+def forward_get(endpoint: str, params: dict = None):
+    try:
+        resp = requests.get(f"{AI_API_BASE}{endpoint}", params=params, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.RequestException as e:
+        return {"error": str(e)}
+
+
+def forward_post(endpoint: str, payload: dict):
+    try:
+        resp = requests.post(f"{AI_API_BASE}{endpoint}", json=payload, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.RequestException as e:
+        return {"error": str(e)}
+
+
+def wrap_response(input_data, ai_response):
+    return {"input": input_data, "ai_output": ai_response}
+
+# ---------------------------
+# Backend Routes
+# ---------------------------
+@app.route("/backend/health", methods=["GET"])
+def backend_health():
+    ai_resp = forward_get("/health")
+    return jsonify(wrap_response({}, ai_resp))
+
+@app.route("/backend/select-language", methods=["POST"])
+def backend_select_language():
+    data = request.json or {}
+    if not data.get("language"):
+        return jsonify({"error": "language is required"}), 400
+
+    ai_resp = forward_post("/select-language", {"language": data["language"]})
+
+    # Persist session if FastAPI returned one
+    if isinstance(ai_resp, dict) and ai_resp.get("session_id"):
+        session_data = {
+            "session_id": ai_resp["session_id"],
+            "language": ai_resp["language"],
+            "current_lesson": ai_resp["current_lesson"],
+            "completed_lessons": [],
+            "chat_history": [],
+            "created_at": datetime.now().isoformat()
+        }
+        save_session(session_data)
+
+    return jsonify(wrap_response(data, ai_resp))
+
+@app.route("/backend/get-lesson/<int:lesson_number>", methods=["GET"])
+def backend_get_lesson(lesson_number):
+    session_id = request.args.get("session_id")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+
+    session = get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    ai_resp = forward_get(f"/lesson/{lesson_number}")
+
+    return jsonify(wrap_response({"lesson_number": lesson_number}, ai_resp))
+
+
+@app.route("/backend/ask-tutor", methods=["POST"])
+def backend_ask_tutor():
+    data = request.json or {}
+    session_id = data.get("session_id")
+    if not session_id or not data.get("question"):
+        return jsonify({"error": "session_id and question are required"}), 400
+
+    session = get_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+
+    ai_resp = forward_post("/ask-tutor", {"question": data["question"]})
+
+    # update chat history
+    if isinstance(ai_resp, dict) and "response" in ai_resp:
+        session["chat_history"].append({
+            "user": data["question"],
+            "assistant": ai_resp["response"],
+            "timestamp": datetime.now().isoformat()
+        })
+        save_session(session)
+
+    return jsonify(wrap_response(data, ai_resp))
+
+@app.route("/backend/generate-quiz/<int:lesson_number>", methods=["GET"])
+def backend_generate_quiz(lesson_number):
+    ai_resp = forward_get(f"/generate-quiz/{lesson_number}")
+    return jsonify(wrap_response({"lesson_number": lesson_number}, ai_resp))
+
+@app.route("/backend/submit-quiz", methods=["POST"])
+def backend_submit_quiz():
+    data = request.json or {}
+
+    # Validation
+    if not data.get("lesson_id"):
+        return jsonify({"error": "lesson_id is required"}), 400
+    if not isinstance(data.get("answers"), list):
+        return jsonify({"error": "answers must be a list"}), 400
+
+    ai_resp = forward_post("/submit-quiz", payload=data)
+    return jsonify(wrap_response(data, ai_resp))
+
+
+@app.route("/backend/session-status", methods=["GET"])
+def backend_session_status():
+    ai_resp = forward_get("/session-status")
+    return jsonify(wrap_response({}, ai_resp))
+
+
+@app.route("/backend/available-languages", methods=["GET"])
+def backend_available_languages():
+    ai_resp = forward_get("/available-languages")
+    return jsonify(wrap_response({}, ai_resp))
+
+
+import requests
+
+def forward_gets(endpoint):
+    url = f"http://127.0.0.1:8000{endpoint}"
+    try:
+        resp = requests.get(url)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.HTTPError as e:
+        # If AI returns JSON error, parse it
+        try:
+            return resp.json()
+        except Exception:
+            return {"error": str(e), "response_text": resp.text}
+    except Exception as e:
+        return {"error": str(e)}
+
+def forward_posts(endpoint, payload):
+    url = f"http://127.0.0.1:8000{endpoint}"
+    try:
+        resp = requests.post(url, json=payload)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.HTTPError as e:
+        try:
+            return resp.json()
+        except Exception:
+            return {"error": str(e), "response_text": resp.text}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.route("/backend/generate-coding-challenge", methods=["GET"])
+def backend_generate_coding_challenge():
+    ai_resp = forward_gets("/generate-coding-challenge")
+    return jsonify(wrap_response({}, ai_resp))
+
+
+@app.route("/backend/submit-code", methods=["POST"])
+def backend_submit_code():
+    data = request.json or {}
+
+    if not data.get("challenge_id"):
+        return jsonify({"error": "challenge_id is required"}), 400
+    if not data.get("code"):
+        return jsonify({"error": "code is required"}), 400
+
+    ai_resp = forward_posts("/submit-code", payload=data)
+    return jsonify(wrap_response(data, ai_resp))
+
+
+# -----------------------------
+# Backend Routes
+# -----------------------------
+
+
 # ==========================
 # MAIN
 # ==========================
