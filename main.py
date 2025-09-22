@@ -1,17 +1,22 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from groq import Groq
+import google.generativeai as genai
 import os
 from dotenv import load_dotenv
-from youtube_transcript_api import YouTubeTranscriptApi
+import yt_dlp
+import requests
+import re
 from urllib.parse import urlparse, parse_qs
 
 load_dotenv()
 
 app = FastAPI()
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-# request models
+# Configure Gemini
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+model = genai.GenerativeModel('gemini-2.0-flash-exp')
+
+# Request models
 class GettingTheScript(BaseModel):
     input_link: str
     language: str
@@ -26,60 +31,117 @@ class ChatRequest(BaseModel):
     input_text: str
     question: str
 
+# YouTube transcript functions with yt-dlp
+def get_youtube_transcript(url, lang='en'):
+    """
+    Get YouTube transcript with automatic language fallback
+    If lang is not 'ar', tries 'en' first then 'ar'
+    If lang is not 'en', tries 'ar' first then 'en'
+    """
+    # Auto language fallback logic
+    if lang not in ['ar', 'en']:
+        lang = 'en'
+    
+    languages = ['ar', 'en'] if lang == 'ar' else ['en', 'ar']
+    
+    try:
+        ydl_opts = {
+            'writesubtitles': True,
+            'writeautomaticsub': True, 
+            'skip_download': True,
+            'quiet': True,
+            'no_warnings': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            for language in languages:
+                # Try manual subtitles first
+                if 'subtitles' in info and language in info['subtitles']:
+                    subtitle_url = info['subtitles'][language][0]['url']
+                    response = requests.get(subtitle_url, timeout=10)
+                    text = parse_vtt(response.text)
+                    if text:
+                        return text
+                
+                # Then try automatic captions
+                if 'automatic_captions' in info and language in info['automatic_captions']:
+                    for sub in info['automatic_captions'][language]:
+                        if sub.get('ext') == 'vtt':
+                            response = requests.get(sub['url'], timeout=10)
+                            text = parse_vtt(response.text)
+                            if text:
+                                return text
+        return None
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
+
+def parse_vtt(content):
+    """Parse VTT and extract clean text"""
+    text = []
+    for line in content.split('\n'):
+        line = line.strip()
+        if (line and not line.startswith('WEBVTT') and 
+            not line.startswith(('Kind:', 'Language:')) and 
+            '-->' not in line and not re.match(r'^\d+$', line)):
+            clean = re.sub(r'<[^>]+>', '', line)
+            if clean:
+                text.append(clean)
+    return ' '.join(text)
+
+def extract_video_id(url):
+    """Extract video ID from various YouTube URL formats"""
+    if 'youtu.be' in url:
+        return url.split('/')[-1].split('?')[0]
+    query = urlparse(url).query
+    params = parse_qs(query)
+    return params.get('v', [None])[0]
+
 # Endpoint for getting YouTube transcript
 @app.post("/getting_script")
 async def get_script(request: GettingTheScript):
     youtube_url = request.input_link
     language = request.language
     
-    def extract_video_id(url):
-        if 'youtu.be' in url:
-            return url.split('/')[-1].split('?')[0]
-        query = urlparse(url).query
-        params = parse_qs(query)
-        return params.get('v', [None])[0]
-
-    def get_youtube_text(url, lang):
-        try:
-            video_id = extract_video_id(url)
-            if not video_id:
-                raise ValueError("Could not extract video ID from URL")
-                
-            # Try to get transcript in requested language
-            try:
-                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
-            except:
-                print(f"No {lang} transcript available, trying English...")
-                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-                
-            return " ".join([entry['text'] for entry in transcript])
+    try:
+        video_id = extract_video_id(youtube_url)
+        if not video_id:
+            raise ValueError("Could not extract video ID from URL")
         
-        except Exception as e:
-            print(f"Error: {str(e)}")
-            return None
-
-    text = get_youtube_text(youtube_url, language)
-
-    if text:
-        return {
-            "status": "success",
-            "video_url": youtube_url,
-            "language": language,
-            "transcript": text
-        }
-    else:
+        text = get_youtube_transcript(youtube_url, language)
+        
+        if text:
+            return {
+                "status": "success",
+                "video_url": youtube_url,
+                "language": language,
+                "transcript": text
+            }
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "status": "error",
+                    "message": "Failed to get transcript",
+                    "possible_reasons": [
+                        "Video has no captions",
+                        "Language not available", 
+                        "Invalid YouTube URL"
+                    ]
+                }
+            )
+    except Exception as e:
         raise HTTPException(
             status_code=400,
             detail={
                 "status": "error",
-                "message": "Failed to get transcript",
-                "possible_reasons": [
-                    "Video has no captions",
-                    "Language not available",
-                    "Invalid YouTube URL"
-                ]
+                "message": f"Error: {str(e)}"
             }
         )
+
 # Endpoint for summarization
 @app.post("/summarize")
 async def summarize(request: SummarizationRequest):
@@ -114,18 +176,8 @@ Summary:
 """
 
     try:
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            model="llama-3.3-70b-versatile",
-            stream=False,
-        )
-        summary = chat_completion.choices[0].message.content
-        return {"summary": summary}
+        response = model.generate_content(prompt)
+        return {"summary": response.text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -134,50 +186,40 @@ Summary:
 async def extract_main_points(request: MainPointsRequest):
     input_text = request.input_text
     prompt = f"""
-    You are a professional assistant. Your task is to extract the main points from the following text and list them in a clear, numbered format (1, 2, 3, ...). Follow these rules:
-    1. The main points must be in the same language as the input text.
-    2. Do not add any information that is not in the original text.
-    3. Ensure the points are concise and cover all key aspects of the text.
+You are a professional assistant. Your task is to extract the main points from the following text and list them in a clear, numbered format (1, 2, 3, ...). Follow these rules:
+1. The main points must be in the same language as the input text.
+2. Do not add any information that is not in the original text.
+3. Ensure the points are concise and cover all key aspects of the text.
 
-    Examples:
+Examples:
 
-    Input (English):
-    Solar energy is one of the most important renewable energy sources. It is converted into electricity using solar panels, which absorb sunlight and convert it into electrical energy. Solar energy is used in many applications, such as generating electricity for homes and businesses, and powering small electronic devices.
+Input (English):
+Solar energy is one of the most important renewable energy sources. It is converted into electricity using solar panels, which absorb sunlight and convert it into electrical energy. Solar energy is used in many applications, such as generating electricity for homes and businesses, and powering small electronic devices.
 
-    Main Points (English):
-    1. Solar energy is a key renewable energy source.
-    2. It is converted into electricity via solar panels.
-    3. It is used in various applications, including powering homes, businesses, and small electronic devices.
+Main Points (English):
+1. Solar energy is a key renewable energy source.
+2. It is converted into electricity via solar panels.
+3. It is used in various applications, including powering homes, businesses, and small electronic devices.
 
-    Input (Arabic):
-    تعتبر الطاقة الشمسية واحدة من أهم مصادر الطاقة المتجددة. يتم تحويل الطاقة الشمسية إلى كهرباء باستخدام الألواح الشمسية، والتي تعمل على امتصاص أشعة الشمس وتحويلها إلى طاقة كهربائية. تستخدم الطاقة الشمسية في العديد من التطبيقات مثل توليد الكهرباء للمنازل والشركات، وتشغيل الأجهزة الإلكترونية الصغيرة.
+Input (Arabic):
+تعتبر الطاقة الشمسية واحدة من أهم مصادر الطاقة المتجددة. يتم تحويل الطاقة الشمسية إلى كهرباء باستخدام الألواح الشمسية، والتي تعمل على امتصاص أشعة الشمس وتحويلها إلى طاقة كهربائية. تستخدم الطاقة الشمسية في العديد من التطبيقات مثل توليد الكهرباء للمنازل والشركات، وتشغيل الأجهزة الإلكترونية الصغيرة.
 
-    Main Points (Arabic):
-    1. الطاقة الشمسية هي مصدر مهم للطاقة المتجددة.
-    2. يتم تحويلها إلى كهرباء عبر الألواح الشمسية.
-    3. تُستخدم في تطبيقات متنوعة مثل توليد الكهرباء للمنازل والشركات.
+Main Points (Arabic):
+1. الطاقة الشمسية هي مصدر مهم للطاقة المتجددة.
+2. يتم تحويلها إلى كهرباء عبر الألواح الشمسية.
+3. تُستخدم في تطبيقات متنوعة مثل توليد الكهرباء للمنازل والشركات.
 
-    Now, extract the main points from the following text. Ensure the points are in the same language as the input text and follow the rules above.
+Now, extract the main points from the following text. Ensure the points are in the same language as the input text and follow the rules above.
 
-    Input:
-    {input_text}
+Input:
+{input_text}
 
-    Main Points:
-    """
+Main Points:
+"""
 
     try:
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            model="llama-3.3-70b-versatile",
-            stream=False,
-        )
-        main_points = chat_completion.choices[0].message.content
-        return {"main_points": main_points}
+        response = model.generate_content(prompt)
+        return {"main_points": response.text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -188,39 +230,30 @@ async def chat(request: ChatRequest):
     question = request.question
 
     prompt = f"""
-    You are a knowledgeable and adaptive assistant. Your task is to answer the user's questions based on the following text. Follow these rules strictly:
-    1. **Language Matching**: Respond in the same language as the question. If the question is in Arabic, respond in Arabic. If the question is in English, respond in English.
-    2. **Contextual Awareness**: 
-       - If the question is related to the provided text, answer it based on the text.
-       - If the question is unrelated to the text, respond politely with:
-         - "عذرًا، لا يمكنني الإجابة على هذا السؤال لأنه ليس في نفس سياق النص المقدم." (if the question is in Arabic).
-         - "Sorry, I cannot answer this question as it is not within the context of the provided text." (if the question is in English).
-    3. **Flexibility**: If the question is vague or ambiguous, ask for clarification or provide a general response based on the text.
-    4. **Accuracy**: Do not add any information that is not in the original text. Your answer must be based solely on the provided text.
+You are a knowledgeable and adaptive assistant. Your task is to answer the user's questions based on the following text. Follow these rules strictly:
+1. **Language Matching**: Respond in the same language as the question. If the question is in Arabic, respond in Arabic. If the question is in English, respond in English.
+2. **Contextual Awareness**: 
+   - If the question is related to the provided text, answer it based on the text.
+   - If the question is unrelated to the text, respond politely with:
+     - "عذرًا، لا يمكنني الإجابة على هذا السؤال لأنه ليس في نفس سياق النص المقدم." (if the question is in Arabic).
+     - "Sorry, I cannot answer this question as it is not within the context of the provided text." (if the question is in English).
+3. **Flexibility**: If the question is vague or ambiguous, ask for clarification or provide a general response based on the text.
+4. **Accuracy**: Do not add any information that is not in the original text. Your answer must be based solely on the provided text.
 
-    Text:
-    {input_text}
-    Question:
-    {question}
-    Answer:
-    """
+Text:
+{input_text}
+Question:
+{question}
+Answer:
+"""
 
     try:
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            model="llama-3.3-70b-versatile",
-            stream=False,
-        )
-        answer = chat_completion.choices[0].message.content
-        return {"answer": answer}
+        response = model.generate_content(prompt)
+        return {"answer": response.text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 # Root endpoint
 @app.get("/")
 async def root():
-    return {"message": "Welcome to FastAPI "}
+    return {"message": "Welcome to FastAPI with yt-dlp and Gemini 2.0 Flash!"}
