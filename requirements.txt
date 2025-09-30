@@ -1,3 +1,4 @@
+supadata==1.4.0
 annotated-types==0.7.0
 anyio==4.11.0
 cachetools==5.5.2
@@ -43,3 +44,4 @@ urllib3==2.4.0
 uvicorn==0.34.0
 youtube-transcript-api==1.1.0
 yt-dlp==2025.9.5
+
