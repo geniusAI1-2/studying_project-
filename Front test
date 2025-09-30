@@ -1,0 +1,74 @@
+🌐 API Gateway Documentation: /studying_project
+These endpoints process data and forward it to your external AI service (AI_BASE_URL_new_one). All requests are POST with a JSON body.
+
+General Request Structure
+Request Type	Purpose	Request Body Structure
+Single Request	Process one item.	{ "key_a": "value", "key_b": "value" }
+Batch Request	Process multiple items at once.	{ "requests": [{ "id": 1, "key_a": "value" }, ...] }
+
+Export to Sheets
+1. Get Script API
+Endpoint: /studying_project/getting_script_from_video
+AI Target: /getting_script
+
+Single Request
+Field	Example Value	Description	Required
+input_link	"https://youtu.be/abc"	The URL of the video.	Yes
+language	"en"	Language code for the script.	Yes
+
+Export to Sheets
+Status	Example Response Body
+200 OK	{"script_content": "The full, segmented video transcript..."}
+400/500 Error	{"error": "Script API failed", "details": "External error details"}
+
+Export to Sheets
+Batch Request
+Field	Example Value	Description
+requests	[{"id": 1, "input_link": "link1", "language": "en"}, ...]	List of items to process, each must have a unique id.
+
+Export to Sheets
+Status	Example Response Body
+200 OK	{"results": [{"id": 1, "response": {"script_content": "..."}}, {"id": 2, "error": "language is required"}]}
+
+Export to Sheets
+2. Summarize API
+Endpoint: /studying_project/summarize
+AI Target: /summarize
+
+Single Request
+Field	Example Value	Description	Required
+input_text	"The long text to be condensed."	The content for summarization.	Yes
+
+Export to Sheets
+Status	Example Response Body
+200 OK	{"summary": "A concise summary of the input."}
+400/500 Error	{"error": "Summarize API failed", "details": "External error details"}
+
+Export to Sheets
+3. Chat API
+Endpoint: /studying_project/chat
+AI Target: /chat
+
+Single Request
+Field	Example Value	Description	Required
+input_text	"Context text for Q&A."	The context/document the AI should answer from.	Yes
+question	"What is the main topic?"	The specific question to ask the AI.	Yes
+
+Export to Sheets
+Status	Example Response Body
+200 OK	{"answer": "The AI's response based on the context."}
+400/500 Error	{"error": "Chat API failed", "details": "External error details"}
+
+Export to Sheets
+4. Extract Main Points API
+Endpoint: /studying_project/extract_main_points
+AI Target: /extract_main_points
+
+Single Request
+Field	Example Value	Description	Required
+input_text	"Detailed text with key arguments."	The content for point extraction.	Yes
+
+Export to Sheets
+Status	Example Response Body
+200 OK	{"main_points": ["Point 1: ...", "Point 2: ..."]}
+400/500 Error	{"error": "Extract API failed", "details": "External error details"}
