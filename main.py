@@ -5,6 +5,8 @@ import os
 from dotenv import load_dotenv
 from supadata import Supadata, SupadataError
 from urllib.parse import urlparse, parse_qs
+from fastapi.middleware.cors import CORSMiddleware
+
 
 load_dotenv()
 
@@ -16,7 +18,13 @@ model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
 # Initialize Supadata client
 supadata = Supadata(api_key=os.getenv("YOUTUBE_APIKEY"))
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or specify ["http://localhost:3000"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # Request models
 class GettingTheScript(BaseModel):
     input_link: str
@@ -244,3 +252,4 @@ Answer:
 @app.get("/")
 async def root():
     return {"message": "Welcome to FastAPI with yt-dlp and Gemini 2.0 Flash!"}
+
